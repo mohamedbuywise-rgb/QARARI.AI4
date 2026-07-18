@@ -1,18 +1,17 @@
 // Shared Gemini calling logic: primary model → fallback model (Section 2),
 // with search grounding enabled and strict JSON-only output enforcement.
 
-// 2026-07-18 update: gemini-3.1-flash-lite is PRIMARY. Its per-token price is
-// slightly higher than 2.5 Flash-Lite ($0.25/$1.50 vs $0.10/$0.40), but it
-// belongs to the Gemini 3.x family, where Google Search grounding costs
-// $14 per 1,000 queries (vs $35 per 1,000 for the 2.5 family). Since grounding
-// is the dominant cost driver for analyze/compare (both use search), routing
-// the vast majority of calls through the cheaper-grounding model wins overall,
-// even though its token rate looks pricier in isolation.
-// gemini-2.5-flash-lite is the FALLBACK — a genuinely different model with its
-// own separate RPM/RPD quota, so it only fires rarely (on primary failure),
-// and its costlier grounding rate barely moves the total bill in practice.
+// 2026-07-19 update: gemini-2.5-flash-lite started returning 404 ("no longer
+// available to new users") — Google is retiring the entire 2.5 family, and
+// it's unsafe to depend on it as a fallback going forward.
+// gemini-3.5-flash is the new FALLBACK — it's Stable/GA with no announced
+// shutdown date (unlike preview models, which is exactly what caused this
+// kind of breakage before). It costs more per token than the primary
+// ($1.50/$9 per 1M vs $0.25/$1.50), but since it only fires when the primary
+// fails, that cost barely moves the total bill — reliability matters more
+// here than shaving a fraction of a cent off a rare fallback call.
 const PRIMARY_MODEL = "gemini-3.1-flash-lite";
-const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+const FALLBACK_MODEL = "gemini-3.5-flash";
 
 interface GeminiCallResult {
   text: string;
@@ -46,11 +45,20 @@ async function callGeminiModel(model: string, prompt: string, imageBase64?: { da
     },
   };
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  // 2026-07-19 fix: send the key via the x-goog-api-key HEADER, not the
+  // ?key= query parameter. Google has started issuing a new "Auth key"
+  // format (prefixed AQ. instead of the old AIza...) as part of migrating
+  // everyone off "Standard keys" — and Auth keys aren't reliably accepted
+  // via the old query-string method. The header works for both old and new
+  // key formats, so this is safe regardless of which type of key is set.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+    },
     body: JSON.stringify(body),
   });
 
